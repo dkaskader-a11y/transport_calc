@@ -1,43 +1,37 @@
+# app.py
 import streamlit as st
 import pandas as pd
 
 from calc import TruckSpec, run_calc
 
 st.set_page_config(page_title="Расчет транспорта по грузам", layout="wide")
+st.title("🚚 Расчет необходимого транспорта под перевозку грузов")
 
-st.title("🚚 Расчет необходимого транспорта (геометрия + shelf packing)")
-st.caption("Загрузи Excel с грузами → получи оценку количества машин и список негабаритов.")
-
-with st.expander("Поля Excel-формы", expanded=True):
+with st.expander("Поля Excel", expanded=True):
     st.markdown("""
-**Обязательные колонки:**
+**Обязательные:**
 - `наименование`
-- `длина` (мм)
-- `ширина` (мм)
-- `высота` (мм)
+- `длина` (мм), `ширина` (мм), `высота` (мм)
 - `штабелируется` (`да`/другое)
 - `количество` **или** `qty`
 
-**Рекомендуемая:**
-- `вес` (кг) — может быть пустым (тогда считаем `вес=0` и предупреждаем)
+**Вес (`вес`)**:
+- может отсутствовать или быть пустым → считаем `вес = 0`, `weight_missing = True`
+- отрицательный вес → строка исключается
 
-**Опциональная:**
-- `max_top_weight` (кг) — сейчас только нормализуется
+**Опционально:**
+- `max_top_weight` (если `штабелируется="да"` и пусто → 50)
 """)
 
-st.sidebar.header("Настройки транспорта")
-
-reserve_len = st.sidebar.slider("Запас по длине, %", 0, 30, 15) / 100.0
-reserve_wid = st.sidebar.slider("Запас по ширине, %", 0, 30, 10) / 100.0
-
-# Можешь расширять список типов как угодно
-trucks = [
-    TruckSpec(name="Фура 82м3", L=13600, W=2450, H=2700, max_payload=20000, reserve_len=reserve_len, reserve_wid=reserve_wid),
-    TruckSpec(name="5т",       L=6000,  W=2400, H=2400, max_payload=5000,  reserve_len=reserve_len, reserve_wid=reserve_wid),
+# Список транспортов — как в твоем финальном Colab коде
+TRUCKS = [
+    TruckSpec(name="Фура 82м3", L=13600, W=2450, H=2600, max_payload=20000, reserve_len=0.0, reserve_wid=0.00),
+    TruckSpec(name="Фура 82м3 запас", L=13600, W=2450, H=2600, max_payload=20000, reserve_len=0.10, reserve_wid=0.05),
+    TruckSpec(name="10т", L=7000, W=2400, H=2400, max_payload=10000, reserve_len=0.10, reserve_wid=0.05),
+    TruckSpec(name="5т", L=6000, W=2400, H=2400, max_payload=5000, reserve_len=0.10, reserve_wid=0.10),
 ]
 
 uploaded = st.file_uploader("Загрузи Excel (.xlsx)", type=["xlsx"])
-
 if not uploaded:
     st.stop()
 
@@ -48,60 +42,78 @@ except Exception as e:
     st.stop()
 
 try:
-    out = run_calc(df_raw, trucks=trucks)
+    out = run_calc(df_raw, trucks=TRUCKS)
 except Exception as e:
     st.error(f"Ошибка расчета: {e}")
     st.stop()
 
-meta = out["meta"]
 summary_df = out["summary_df"]
 best_truck = out["best_truck"]
 best_res = out["best_res"]
+metrics = out["metrics"]
 
-col1, col2, col3 = st.columns(3)
-col1.metric("Грузовых мест (после количества)", meta["total_items_after_qty"])
-col2.metric("Без веса", meta["missing_weight_count"])
-col3.metric("Доля без веса", f"{meta['missing_weight_ratio']:.1%}")
+missing_weight_count = out["missing_weight_count"]
+use_payload = out["use_payload"]
 
-if meta["missing_weight_count"] > 0:
-    st.warning("Есть позиции без веса. Подбор транспорта выполняется по геометрии; ограничение по грузоподъемности учитывается только по известным весам.")
+# Метрики сверху
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Грузовых мест (после количества)", metrics["total_items_after_qty"])
+c2.metric("Без веса", missing_weight_count)
+c3.metric("Учет грузоподъемности", "ДА" if use_payload else "НЕТ")
+c4.metric("Нужно машин (лучший)", int(best_res["trucks_used"]) if best_res else 0)
 
-st.subheader("Сравнение типов транспорта (по геометрии)")
-st.dataframe(summary_df, use_container_width=True)
-
-if best_truck is not None:
-    st.subheader("Итог по выбранному транспорту")
-    st.write(
-        f"**{best_truck.name}** | эффективный пол: **{best_truck.eff_L}×{best_truck.eff_W} мм** "
-        f"| высота: **{best_truck.eff_H} мм** | запас: **{int(best_truck.reserve_len*100)}% / {int(best_truck.reserve_wid*100)}%**"
+if not use_payload:
+    st.warning(
+        "Обнаружены грузы без веса. Подбор транспорта выполнен БЕЗ учета грузоподъемности "
+        "(только геометрия), чтобы не занизить кол-во машин."
     )
-    st.write(f"**Нужно машин (по геометрии): {best_res['trucks_used']}**")
+
+st.subheader("Сравнение типов транспорта")
+st.dataframe(summary_df, width="stretch")
+
+if best_truck is not None and best_res is not None:
+    st.subheader("Итог")
+    st.write(f"**Выбран транспорт:** {best_truck.name}")
+    st.write(f"**Нужно машин:** {best_res['trucks_used']}")
+    st.write(
+        f"Эффективные размеры пола: **{best_truck.eff_L} × {best_truck.eff_W} мм** | "
+        f"Запас: **{int(best_truck.reserve_len*100)}% / {int(best_truck.reserve_wid*100)}%** | "
+        f"Высота: **{best_truck.eff_H} мм**"
+    )
 
 st.subheader("Характеристики груза")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Самый длинный (мм)", meta["longest_len_mm"])
-c2.metric("Самый широкий (мм)", meta["widest_mm"])
-c3.metric(">150 кг (из известных)", meta["count_gt_150_known"])
-c4.metric(">500 кг (из известных)", meta["count_gt_500_known"])
+cc1, cc2, cc3, cc4 = st.columns(4)
+cc1.metric("Самый длинный (мм)", metrics["longest_len_mm"])
+cc2.metric("Самый широкий (мм)", metrics["widest_mm"])
+cc3.metric(">150 кг (из известных)", metrics["count_gt_150_known"])
+cc4.metric(">500 кг (из известных)", metrics["count_gt_500_known"])
 
-if meta["heaviest_known"] is not None:
-    hk = meta["heaviest_known"]
-    st.info(f"Самый тяжелый (по известным весам): **{hk['вес']} кг** — {hk['наименование']} ({int(hk['длина'])}×{int(hk['ширина'])}×{int(hk['высота'])} мм)")
+if metrics["heaviest_row_known"] is not None:
+    hr = metrics["heaviest_row_known"]
+    st.info(
+        f"Самый тяжелый (по известным весам): **{metrics['heaviest_weight_known']:.1f} кг** | "
+        f"{hr['наименование']} ({int(hr['длина'])}×{int(hr['ширина'])}×{int(hr['высота'])} мм)"
+    )
 else:
-    st.info("Вес отсутствует во всех строках — самый тяжелый определить нельзя.")
+    st.info("Самый тяжелый груз: веса отсутствуют во всех строках (или все веса пустые).")
 
-tabs = st.tabs(["Статистика по машинам", "Размещения", "Негабарит", "Не уложилось"])
+tabs = st.tabs(["Статистика по машинам", "Негабарит", "Примеры размещений", "Не уложилось"])
 
 with tabs[0]:
-    st.dataframe(best_res["truck_stats_df"], use_container_width=True)
+    if best_res is not None and not best_res["truck_stats_df"].empty:
+        st.dataframe(best_res["truck_stats_df"], width="stretch")
+    else:
+        st.write("Статистика по машинам: нет (ничего не уложилось)")
 
 with tabs[1]:
-    st.dataframe(best_res["placements_df"].head(2000), use_container_width=True)
+    if best_res is not None and isinstance(best_res.get("oversize_df"), pd.DataFrame):
+        overs_df = best_res["oversize_df"]
+        st.dataframe(overs_df, width="stretch")
 
 with tabs[2]:
-    overs = best_res["oversize_df"][["наименование", "длина", "ширина", "высота", "вес", "weight_missing"]]
-    st.dataframe(overs, use_container_width=True)
+    if best_res is not None and isinstance(best_res.get("placements_df"), pd.DataFrame):
+        st.dataframe(best_res["placements_df"].head(30), width="stretch")
 
 with tabs[3]:
-    notp = best_res["not_packed_df"][["наименование", "длина", "ширина", "высота", "вес", "weight_missing"]]
-    st.dataframe(notp, use_container_width=True)
+    if best_res is not None and isinstance(best_res.get("not_packed_df"), pd.DataFrame):
+        st.dataframe(best_res["not_packed_df"], width="stretch")
