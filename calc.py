@@ -461,6 +461,7 @@ def pack_one_truck_shelf(
     used_length_mm = max((p.x + p.placed_L for p in floor_placements), default=0)
 
     truck_stats = {
+        truck_stats.update(stack_debug),
         "placed_count": len(placed),
         "remaining_count": len(remaining),
         "used_width_mm": int(used_w),
@@ -692,3 +693,4 @@ def run_calc(df_raw: pd.DataFrame, trucks: List[TruckSpec]) -> Dict:
             "count_gt_500_known": count_gt_500,
         }
     }
+
