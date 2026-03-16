@@ -345,6 +345,15 @@ def pack_one_truck_shelf(
     # -------------------------
     # Фаза 2: штабелирование
     # -------------------------
+
+    stack_debug = {
+    "checked_stackable_items": 0,
+    "stacked_success": 0,
+    "rejected_no_base_fit": 0,
+    "rejected_height": 0,
+    "rejected_weight": 0,
+}
+    
     if remaining and stacks:
         remaining_non_stackable = [it for it in remaining if not it.stackable]
         remaining_stackable = [it for it in remaining if it.stackable]
@@ -352,6 +361,11 @@ def pack_one_truck_shelf(
 
         still_unplaced_stackable: List[Item] = []
         stacked_items_count = 0
+
+        stack_debug["checked_stackable_items"] += 1
+        had_height_fail = False
+        had_weight_fail = False
+        had_fit_fail = False
 
         for item in remaining_stackable:
             # Если учитываем payload — проверяем и тут
