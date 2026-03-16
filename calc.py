@@ -199,18 +199,28 @@ def _choose_orientation_on_top(
 
 
 def _floor_sort_key(item: Item, sort_by: str = "area_desc"):
-    """
-    Нештабелируемые — в приоритете на пол, потому что их нельзя ставить сверху.
-    Затем сортировка по габаритной "крупности".
-    """
-    must_be_floor_priority = 0 if not item.stackable else 1
+    area = item.L * item.W
+    max_side = max(item.L, item.W)
+
+    # 0 = обязательно на пол
+    # 1 = можно на пол, но лучше как база
+    # 2 = лучше оставить на верх
+    if not item.stackable:
+        priority = 0
+    else:
+        # крупные штабелируемые оставляем как базы,
+        # мелкие — стараемся не тратить на пол
+        if area >= 1_000_000:   # порог можно потом подкрутить
+            priority = 1
+        else:
+            priority = 2
 
     if sort_by == "max_side_desc":
-        size_key = max(item.L, item.W)
+        size_key = max_side
     else:
-        size_key = item.L * item.W
+        size_key = area
 
-    return (must_be_floor_priority, -size_key, -max(item.L, item.W))
+    return (priority, -size_key, -max_side)
 
 
 def _stack_sort_key(item: Item):
@@ -460,6 +470,8 @@ def pack_one_truck_shelf(
     floor_placements = [p for p in placements if p.stack_level == 0]
     used_length_mm = max((p.x + p.placed_L for p in floor_placements), default=0)
 
+floor_stackable_bases = sum(1 for p in placements if p.stack_level == 0 and p.stacked_on_item_idx is None)
+    
     truck_stats = {
         "placed_count": len(placed),
         "remaining_count": len(remaining),
@@ -471,6 +483,7 @@ def pack_one_truck_shelf(
         "payload_used_kg": float(truck.max_payload - weight_left) if use_payload_constraint else np.nan,
         "payload_limit_kg": float(truck.max_payload) if use_payload_constraint else np.nan,
         "use_payload_constraint": bool(use_payload_constraint),
+        "floor_stackable_bases": int(floor_stackable_bases),
     }
 
     truck_stats.update(stack_debug)
@@ -694,5 +707,6 @@ def run_calc(df_raw: pd.DataFrame, trucks: List[TruckSpec]) -> Dict:
             "count_gt_500_known": count_gt_500,
         }
     }
+
 
 
