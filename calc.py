@@ -469,8 +469,6 @@ def pack_one_truck_shelf(
     # used length по полу: берём только floor-level размещения
     floor_placements = [p for p in placements if p.stack_level == 0]
     used_length_mm = max((p.x + p.placed_L for p in floor_placements), default=0)
-
-floor_stackable_bases = sum(1 for p in placements if p.stack_level == 0 and p.stacked_on_item_idx is None)
     
     truck_stats = {
         "placed_count": len(placed),
@@ -483,7 +481,7 @@ floor_stackable_bases = sum(1 for p in placements if p.stack_level == 0 and p.st
         "payload_used_kg": float(truck.max_payload - weight_left) if use_payload_constraint else np.nan,
         "payload_limit_kg": float(truck.max_payload) if use_payload_constraint else np.nan,
         "use_payload_constraint": bool(use_payload_constraint),
-        "floor_stackable_bases": int(floor_stackable_bases),
+
     }
 
     truck_stats.update(stack_debug)
@@ -707,6 +705,7 @@ def run_calc(df_raw: pd.DataFrame, trucks: List[TruckSpec]) -> Dict:
             "count_gt_500_known": count_gt_500,
         }
     }
+
 
 
 
