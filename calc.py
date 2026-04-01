@@ -8,7 +8,7 @@ from typing import List, Dict, Tuple, Optional
 
 
 # ============================================================
-# C) Validate + Normalize
+# Validate + Normalize
 # ============================================================
 
 def normalize_input(df_raw: pd.DataFrame) -> pd.DataFrame:
@@ -17,20 +17,17 @@ def normalize_input(df_raw: pd.DataFrame) -> pd.DataFrame:
     if missing_cols:
         raise ValueError(f"Отсутствуют обязательные колонки: {missing_cols}")
 
-    # "вес" НЕ обязательный
     if "вес" not in df_raw.columns:
         df_raw = df_raw.copy()
         df_raw["вес"] = np.nan
 
     df = df_raw.copy()
 
-    # количество -> qty
     if "qty" not in df.columns and "количество" in df.columns:
         df["qty"] = df["количество"]
     elif "qty" not in df.columns and "количество" not in df.columns:
         df["qty"] = 1
 
-    # габариты / qty — строго
     num_cols_strict = ["длина", "ширина", "высота", "qty"]
     for col in num_cols_strict:
         df[col] = (
@@ -40,7 +37,6 @@ def normalize_input(df_raw: pd.DataFrame) -> pd.DataFrame:
         )
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # вес — допускаем пустой
     df["вес"] = (
         df["вес"].astype(str)
         .str.replace(",", ".", regex=False)
@@ -51,11 +47,9 @@ def normalize_input(df_raw: pd.DataFrame) -> pd.DataFrame:
     df["weight_missing"] = df["вес"].isna()
     df.loc[df["weight_missing"], "вес"] = 0.0
 
-    # штабелируется -> да/нет
     df["штабелируется"] = df["штабелируется"].astype(str).str.strip().str.lower()
     df["штабелируется"] = np.where(df["штабелируется"].eq("да"), "да", "нет")
 
-    # max_top_weight
     if "max_top_weight" not in df.columns:
         df["max_top_weight"] = np.nan
 
@@ -66,15 +60,12 @@ def normalize_input(df_raw: pd.DataFrame) -> pd.DataFrame:
     df.loc[(df["штабелируется"] == "да") & (df["max_top_weight"].isna()), "max_top_weight"] = 50.0
     df["max_top_weight"] = df["max_top_weight"].fillna(0.0)
 
-    # qty int
     df["qty"] = df["qty"].fillna(1)
     df["qty"] = np.ceil(df["qty"]).astype(int)
 
-    # убираем строки с плохими габаритами/qty
     bad_numeric = df[["длина", "ширина", "высота", "qty"]].isna().any(axis=1)
     df = df.loc[~bad_numeric].copy()
 
-    # убираем строки с неположительными габаритами/qty + отрицательный вес
     bad_nonpos = (
         (df[["длина", "ширина", "высота"]] <= 0).any(axis=1)
         | (df["qty"] <= 0)
@@ -82,25 +73,22 @@ def normalize_input(df_raw: pd.DataFrame) -> pd.DataFrame:
     )
     df = df.loc[~bad_nonpos].copy()
 
-    # размножаем по qty
     df = df.loc[df.index.repeat(df["qty"])].reset_index(drop=True)
-
-    # row_id
     df["row_id"] = df.index
     return df
 
 
 # ============================================================
-# D) Packing module
+# Models
 # ============================================================
 
 @dataclass
 class TruckSpec:
     name: str
-    L: int  # мм
-    W: int  # мм
-    H: int  # мм
-    max_payload: float  # кг
+    L: int
+    W: int
+    H: int
+    max_payload: float
     reserve_len: float = 0.15
     reserve_wid: float = 0.10
 
@@ -114,7 +102,7 @@ class TruckSpec:
 
     @property
     def eff_H(self) -> int:
-        return int(self.H)  # без запаса
+        return int(self.H)
 
 
 @dataclass
@@ -148,8 +136,11 @@ class Placement:
     stacked_on_item_name: Optional[str]
 
 
+# ============================================================
+# Geometry helpers
+# ============================================================
+
 def fits_item_3d(item: Item, truck: TruckSpec, allow_rotate_floor: bool = True) -> bool:
-    # высота без запаса, пол с запасом
     if item.H > truck.eff_H:
         return False
     if item.L <= truck.eff_L and item.W <= truck.eff_W:
@@ -182,10 +173,6 @@ def _choose_orientation_on_top(
     top_L: int,
     top_W: int,
 ) -> Optional[Tuple[int, int, bool]]:
-    """
-    Проверяем, можно ли поставить item на верх текущей стопки.
-    Верхняя опора — прямоугольник top_L x top_W.
-    """
     candidates = []
     if item.L <= top_L and item.W <= top_W:
         candidates.append((item.L, item.W, False, (top_L - item.L) * (top_W - item.W)))
@@ -202,15 +189,10 @@ def _floor_sort_key(item: Item, sort_by: str = "area_desc"):
     area = item.L * item.W
     max_side = max(item.L, item.W)
 
-    # 0 = обязательно на пол
-    # 1 = можно на пол, но лучше как база
-    # 2 = лучше оставить на верх
     if not item.stackable:
         priority = 0
     else:
-        # крупные штабелируемые оставляем как базы,
-        # мелкие — стараемся не тратить на пол
-        if area >= 1_000_000:   # порог можно потом подкрутить
+        if area >= 1_000_000:
             priority = 1
         else:
             priority = 2
@@ -224,12 +206,12 @@ def _floor_sort_key(item: Item, sort_by: str = "area_desc"):
 
 
 def _stack_sort_key(item: Item):
-    """
-    Для попытки поставить сверху:
-    сначала более крупные/тяжелые, потом мелочь.
-    """
     return (-(item.L * item.W), -item.weight, -item.H)
 
+
+# ============================================================
+# Single truck packing
+# ============================================================
 
 def pack_one_truck_shelf(
     items: List[Item],
@@ -238,37 +220,20 @@ def pack_one_truck_shelf(
     sort_by: str = "area_desc",
     use_payload_constraint: bool = True
 ) -> Tuple[List[Item], List[Item], List[Placement], Dict]:
-    """
-    Логика:
-      1) укладываем по полу рядами
-      2) оставшиеся штабелируемые грузы пытаемся поставить сверху на уже уложенные штабелируемые
-    """
     items_sorted = sorted(items, key=lambda it: _floor_sort_key(it, sort_by=sort_by))
 
     remaining = items_sorted[:]
     placed: List[Item] = []
     placements: List[Placement] = []
 
-    # Для payload
     weight_left = truck.max_payload
-
-    # Для shelf packing
     used_w = 0
     shelf_no = -1
     progress_made = True
 
-    # Состояние стопок на полу
-    # Каждый stack хранит:
-    # - координаты базы (x, y)
-    # - текущий верхний footprint (top_L, top_W)
-    # - total_height
-    # - remaining_caps: сколько ещё веса может принять каждый уровень ниже
-    # - top item info для трассировки
     stacks: List[Dict] = []
 
-    # -------------------------
     # Фаза 1: укладка по полу
-    # -------------------------
     while remaining and used_w < truck.eff_W and progress_made:
         progress_made = False
         shelf_no += 1
@@ -319,7 +284,6 @@ def pack_one_truck_shelf(
                 )
             )
 
-            # Если груз штабелируемый — он может стать базой стопки
             if item.stackable:
                 stacks.append({
                     "x": x,
@@ -352,33 +316,16 @@ def pack_one_truck_shelf(
 
         used_w += shelf_height_w
 
-    # -------------------------
     # Фаза 2: штабелирование
-    # -------------------------
-
-    stack_debug = {
-    "checked_stackable_items": 0,
-    "stacked_success": 0,
-    "rejected_no_base_fit": 0,
-    "rejected_height": 0,
-    "rejected_weight": 0,
-}
-    
+    stacked_items_count = 0
     if remaining and stacks:
         remaining_non_stackable = [it for it in remaining if not it.stackable]
         remaining_stackable = [it for it in remaining if it.stackable]
         remaining_stackable = sorted(remaining_stackable, key=_stack_sort_key)
 
         still_unplaced_stackable: List[Item] = []
-        stacked_items_count = 0
-
-        stack_debug["checked_stackable_items"] += 1
-        had_height_fail = False
-        had_weight_fail = False
-        had_fit_fail = False
 
         for item in remaining_stackable:
-            # Если учитываем payload — проверяем и тут
             if use_payload_constraint and (item.weight > weight_left):
                 still_unplaced_stackable.append(item)
                 continue
@@ -388,11 +335,7 @@ def pack_one_truck_shelf(
             best_score = None
 
             for s_idx, stack in enumerate(stacks):
-                # На эту стопку можно ставить только если:
-                # 1) item сам можно ставить сверху -> item.stackable == True
-                # 2) хватает высоты
-                # 3) хватает footprint на верхнем уровне
-                # 4) все нижние уровни выдерживают добавляемый вес
+                # Высота учитывается здесь:
                 if stack["total_height"] + item.H > truck.eff_H:
                     continue
 
@@ -408,8 +351,6 @@ def pack_one_truck_shelf(
                     continue
 
                 placed_L, placed_W, rotated = orient
-
-                # score: стараемся плотнее заполнить верх
                 waste = (stack["top_L"] * stack["top_W"]) - (placed_L * placed_W)
                 score = (waste, stack["total_height"])
 
@@ -444,9 +385,7 @@ def pack_one_truck_shelf(
                 )
             )
 
-            # Новый груз добавляет свой вес ко всем уровням ниже
             stack["remaining_caps"] = [cap - item.weight for cap in stack["remaining_caps"]]
-            # И сам становится новым уровнем, способным принять сверху свой max_top_weight
             stack["remaining_caps"].append(float(item.max_top_weight))
 
             stack["top_L"] = placed_L
@@ -463,13 +402,10 @@ def pack_one_truck_shelf(
             stacked_items_count += 1
 
         remaining = remaining_non_stackable + still_unplaced_stackable
-    else:
-        stacked_items_count = 0
 
-    # used length по полу: берём только floor-level размещения
     floor_placements = [p for p in placements if p.stack_level == 0]
     used_length_mm = max((p.x + p.placed_L for p in floor_placements), default=0)
-    
+
     truck_stats = {
         "placed_count": len(placed),
         "remaining_count": len(remaining),
@@ -481,10 +417,7 @@ def pack_one_truck_shelf(
         "payload_used_kg": float(truck.max_payload - weight_left) if use_payload_constraint else np.nan,
         "payload_limit_kg": float(truck.max_payload) if use_payload_constraint else np.nan,
         "use_payload_constraint": bool(use_payload_constraint),
-
     }
-
-    truck_stats.update(stack_debug)
 
     return placed, remaining, placements, truck_stats
 
@@ -517,18 +450,10 @@ def _items_from_df(df: pd.DataFrame) -> List[Item]:
 
 
 # ============================================================
-# RUN: основной расчет (смешанный парк)
+# Main run
 # ============================================================
 
 def run_calc(df_raw: pd.DataFrame, trucks: List[TruckSpec]) -> Dict:
-    """
-    Логика подбора:
-      - если есть weight_missing -> use_payload=False
-      - подбираем смешанный парк:
-          1) пробуем закрыть остаток самым маленьким типом
-          2) если нельзя -> берем тип, который увозит максимум мест за 1 машину
-          3) повторяем, каждый раз пытаясь перейти в меньшую категорию
-    """
     df = normalize_input(df_raw)
 
     missing_weight_count = int(df["weight_missing"].sum()) if len(df) else 0
@@ -542,7 +467,6 @@ def run_calc(df_raw: pd.DataFrame, trucks: List[TruckSpec]) -> Dict:
 
     all_items = _items_from_df(df)
 
-    # Глобальный негабарит: не влезает ни в один выбранный тип
     oversize_items: List[Item] = []
     packable_items: List[Item] = []
     for it in all_items:
@@ -565,7 +489,7 @@ def run_calc(df_raw: pd.DataFrame, trucks: List[TruckSpec]) -> Dict:
         chosen_placements: Optional[List[Placement]] = None
         chosen_stats: Optional[Dict] = None
 
-        # 1) пробуем закрыть весь остаток самым маленьким типом
+        # Пробуем закрыть остаток самым маленьким типом
         for t in trucks_small_to_big:
             placed, rem, placements, stats = pack_one_truck_shelf(
                 items=remaining,
@@ -581,7 +505,7 @@ def run_calc(df_raw: pd.DataFrame, trucks: List[TruckSpec]) -> Dict:
                 chosen_stats = stats
                 break
 
-        # 2) если не нашли — выбираем тип, который увозит максимум мест
+        # Иначе берём тип, который увозит максимум мест за один рейс
         if chosen is None:
             best_t: Optional[TruckSpec] = None
             best_bundle = None
@@ -661,7 +585,6 @@ def run_calc(df_raw: pd.DataFrame, trucks: List[TruckSpec]) -> Dict:
         "max_top_weight": it.max_top_weight,
     } for it in not_packed_items])
 
-    # Метрики по грузам
     longest_len_mm = int(df["длина"].max()) if len(df) else 0
     widest_mm = int(df["ширина"].max()) if len(df) else 0
     tallest_mm = int(df["высота"].max()) if len(df) else 0
@@ -685,15 +608,12 @@ def run_calc(df_raw: pd.DataFrame, trucks: List[TruckSpec]) -> Dict:
         "df_norm": df,
         "missing_weight_count": missing_weight_count,
         "use_payload": use_payload,
-
         "fleet_summary_df": fleet_summary_df,
         "total_trucks": total_trucks,
-
         "placements_df": placements_df,
         "truck_stats_df": truck_stats_df,
         "oversize_df": oversize_df,
         "not_packed_df": not_packed_df,
-
         "metrics": {
             "total_items_after_qty": int(len(df)),
             "longest_len_mm": longest_len_mm,
@@ -705,7 +625,3 @@ def run_calc(df_raw: pd.DataFrame, trucks: List[TruckSpec]) -> Dict:
             "count_gt_500_known": count_gt_500,
         }
     }
-
-
-
-
