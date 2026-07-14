@@ -152,21 +152,48 @@ def fits_item_3d(item: Item, truck: TruckSpec, allow_rotate_floor: bool = True) 
 
 def _choose_orientation_for_shelf(
     item: Item,
-    remaining_len: int,
-    shelf_remaining_w: int,
+    remaining_primary: int,
+    shelf_remaining_cross: int,
+    shelf_axis: str,
     allow_rotate_floor: bool
 ) -> Optional[Tuple[int, int, bool]]:
+    """Выбирает ориентацию места внутри ряда.
+
+    shelf_axis="length": ряд заполняется вдоль длины кузова,
+    следующие ряды добавляются по ширине.
+
+    shelf_axis="width": ряд заполняется поперёк кузова,
+    следующие ряды добавляются по длине.
+    """
+    if shelf_axis not in {"length", "width"}:
+        raise ValueError(f"Неизвестное направление рядов: {shelf_axis}")
+
     candidates = []
-    if item.L <= remaining_len and item.W <= shelf_remaining_w:
-        candidates.append((item.L, item.W, False, remaining_len - item.L))
-    if allow_rotate_floor and item.W <= remaining_len and item.L <= shelf_remaining_w:
-        candidates.append((item.W, item.L, True, remaining_len - item.W))
+    orientations = [(item.L, item.W, False)]
+    if allow_rotate_floor and item.L != item.W:
+        orientations.append((item.W, item.L, True))
+
+    for placed_L, placed_W, rotated in orientations:
+        primary_size = placed_L if shelf_axis == "length" else placed_W
+        cross_size = placed_W if shelf_axis == "length" else placed_L
+
+        if primary_size <= remaining_primary and cross_size <= shelf_remaining_cross:
+            candidates.append((
+                placed_L,
+                placed_W,
+                rotated,
+                remaining_primary - primary_size,
+                cross_size,
+            ))
+
     if not candidates:
         return None
-    candidates.sort(key=lambda x: (x[3], x[1]))
-    placed_L, placed_W, rotated, _ = candidates[0]
-    return placed_L, placed_W, rotated
 
+    # Сначала плотнее закрываем текущий ряд, затем предпочитаем
+    # вариант с меньшей толщиной ряда.
+    candidates.sort(key=lambda x: (x[3], x[4]))
+    placed_L, placed_W, rotated, _, _ = candidates[0]
+    return placed_L, placed_W, rotated
 
 def _choose_orientation_on_top(
     item: Item,
@@ -213,13 +240,15 @@ def _stack_sort_key(item: Item):
 # Single truck packing
 # ============================================================
 
-def pack_one_truck_shelf(
+def _pack_one_truck_shelf_variant(
     items: List[Item],
     truck: TruckSpec,
     allow_rotate_floor: bool = True,
     sort_by: str = "area_desc",
+    shelf_axis: str = "length",
     use_payload_constraint: bool = True
 ) -> Tuple[List[Item], List[Item], List[Placement], Dict]:
+    """Строит один вариант рядовой укладки для одной машины."""
     items_sorted = sorted(items, key=lambda it: _floor_sort_key(it, sort_by=sort_by))
 
     remaining = items_sorted[:]
@@ -227,43 +256,61 @@ def pack_one_truck_shelf(
     placements: List[Placement] = []
 
     weight_left = truck.max_payload
-    used_w = 0
     shelf_no = -1
     progress_made = True
 
+    if shelf_axis == "length":
+        primary_limit = truck.eff_L
+        cross_limit = truck.eff_W
+    elif shelf_axis == "width":
+        primary_limit = truck.eff_W
+        cross_limit = truck.eff_L
+    else:
+        raise ValueError(f"Неизвестное направление рядов: {shelf_axis}")
+
+    used_cross = 0
     stacks: List[Dict] = []
 
-    # Фаза 1: укладка по полу
-    while remaining and used_w < truck.eff_W and progress_made:
+    # Фаза 1: укладка по полу рядами.
+    while remaining and used_cross < cross_limit and progress_made:
         progress_made = False
         shelf_no += 1
 
-        shelf_y = used_w
-        shelf_remaining_w = truck.eff_W - used_w
-        shelf_remaining_len = truck.eff_L
-        shelf_height_w = 0
+        shelf_cross_start = used_cross
+        shelf_remaining_cross = cross_limit - used_cross
+        shelf_remaining_primary = primary_limit
+        shelf_thickness = 0
 
         i = 0
         while i < len(remaining):
             item = remaining[i]
 
-            if use_payload_constraint and (item.weight > weight_left):
+            if use_payload_constraint and item.weight > weight_left:
                 i += 1
                 continue
 
             orient = _choose_orientation_for_shelf(
                 item=item,
-                remaining_len=shelf_remaining_len,
-                shelf_remaining_w=shelf_remaining_w,
-                allow_rotate_floor=allow_rotate_floor
+                remaining_primary=shelf_remaining_primary,
+                shelf_remaining_cross=shelf_remaining_cross,
+                shelf_axis=shelf_axis,
+                allow_rotate_floor=allow_rotate_floor,
             )
             if orient is None:
                 i += 1
                 continue
 
             placed_L, placed_W, rotated = orient
-            x = truck.eff_L - shelf_remaining_len
-            y = shelf_y
+            primary_size = placed_L if shelf_axis == "length" else placed_W
+            cross_size = placed_W if shelf_axis == "length" else placed_L
+            primary_pos = primary_limit - shelf_remaining_primary
+
+            if shelf_axis == "length":
+                x = primary_pos
+                y = shelf_cross_start
+            else:
+                x = shelf_cross_start
+                y = primary_pos
 
             placements.append(
                 Placement(
@@ -298,8 +345,8 @@ def pack_one_truck_shelf(
                     "stack_level": 0,
                 })
 
-            shelf_remaining_len -= placed_L
-            shelf_height_w = max(shelf_height_w, placed_W)
+            shelf_remaining_primary -= primary_size
+            shelf_thickness = max(shelf_thickness, cross_size)
 
             if use_payload_constraint:
                 weight_left -= item.weight
@@ -308,15 +355,15 @@ def pack_one_truck_shelf(
             remaining.pop(i)
             progress_made = True
 
-            if shelf_remaining_len <= 0:
+            if shelf_remaining_primary <= 0:
                 break
 
-        if shelf_height_w == 0:
+        if shelf_thickness == 0:
             break
 
-        used_w += shelf_height_w
+        used_cross += shelf_thickness
 
-    # Фаза 2: штабелирование
+    # Фаза 2: штабелирование. Логика сохранена из первой версии.
     stacked_items_count = 0
     if remaining and stacks:
         remaining_non_stackable = [it for it in remaining if not it.stackable]
@@ -326,7 +373,7 @@ def pack_one_truck_shelf(
         still_unplaced_stackable: List[Item] = []
 
         for item in remaining_stackable:
-            if use_payload_constraint and (item.weight > weight_left):
+            if use_payload_constraint and item.weight > weight_left:
                 still_unplaced_stackable.append(item)
                 continue
 
@@ -335,7 +382,6 @@ def pack_one_truck_shelf(
             best_score = None
 
             for s_idx, stack in enumerate(stacks):
-                # Высота учитывается здесь:
                 if stack["total_height"] + item.H > truck.eff_H:
                     continue
 
@@ -405,14 +451,21 @@ def pack_one_truck_shelf(
 
     floor_placements = [p for p in placements if p.stack_level == 0]
     used_length_mm = max((p.x + p.placed_L for p in floor_placements), default=0)
+    used_width_mm = max((p.y + p.placed_W for p in floor_placements), default=0)
+    floor_item_area_mm2 = sum(p.placed_L * p.placed_W for p in floor_placements)
+    floor_envelope_area_mm2 = used_length_mm * used_width_mm
 
     truck_stats = {
         "placed_count": len(placed),
         "remaining_count": len(remaining),
-        "used_width_mm": int(used_w),
+        "packing_strategy": "продольные ряды" if shelf_axis == "length" else "поперечные ряды",
+        "sort_strategy": sort_by,
+        "used_width_mm": int(used_width_mm),
         "eff_width_mm": int(truck.eff_W),
         "used_length_mm": int(used_length_mm),
         "eff_length_mm": int(truck.eff_L),
+        "floor_item_area_mm2": int(floor_item_area_mm2),
+        "floor_envelope_area_mm2": int(floor_envelope_area_mm2),
         "stacked_items_count": int(stacked_items_count),
         "payload_used_kg": float(truck.max_payload - weight_left) if use_payload_constraint else np.nan,
         "payload_limit_kg": float(truck.max_payload) if use_payload_constraint else np.nan,
@@ -420,6 +473,57 @@ def pack_one_truck_shelf(
     }
 
     return placed, remaining, placements, truck_stats
+
+
+def _packing_variant_score(
+    bundle: Tuple[List[Item], List[Item], List[Placement], Dict]
+) -> Tuple[int, int, int, int, int]:
+    """Сравнивает варианты: больше мест, больше груза по площади, компактнее раскладка."""
+    placed, _, placements, stats = bundle
+    total_item_area = sum(p.placed_L * p.placed_W for p in placements)
+    return (
+        len(placed),
+        total_item_area,
+        -int(stats["floor_envelope_area_mm2"]),
+        -int(stats["used_length_mm"]),
+        -int(stats["used_width_mm"]),
+    )
+
+
+def pack_one_truck_shelf(
+    items: List[Item],
+    truck: TruckSpec,
+    allow_rotate_floor: bool = True,
+    sort_by: str = "area_desc",
+    use_payload_constraint: bool = True
+) -> Tuple[List[Item], List[Item], List[Placement], Dict]:
+    """Проверяет несколько простых рядовых схем и возвращает лучшую.
+
+    Вместо одного продольного варианта строятся:
+    - продольные ряды с сортировкой по площади;
+    - поперечные ряды с сортировкой по площади;
+    - продольные ряды с сортировкой по максимальной стороне;
+    - поперечные ряды с сортировкой по максимальной стороне.
+    """
+    sort_variants = [sort_by]
+    if sort_by != "max_side_desc":
+        sort_variants.append("max_side_desc")
+
+    bundles = []
+    for shelf_axis in ("length", "width"):
+        for sort_variant in sort_variants:
+            bundles.append(
+                _pack_one_truck_shelf_variant(
+                    items=items,
+                    truck=truck,
+                    allow_rotate_floor=allow_rotate_floor,
+                    sort_by=sort_variant,
+                    shelf_axis=shelf_axis,
+                    use_payload_constraint=use_payload_constraint,
+                )
+            )
+
+    return max(bundles, key=_packing_variant_score)
 
 
 # ============================================================
@@ -509,7 +613,7 @@ def run_calc(df_raw: pd.DataFrame, trucks: List[TruckSpec]) -> Dict:
         if chosen is None:
             best_t: Optional[TruckSpec] = None
             best_bundle = None
-            best_count = -1
+            best_choice_score = None
 
             for t in trucks_big_to_small:
                 placed, rem, placements, stats = pack_one_truck_shelf(
@@ -519,12 +623,20 @@ def run_calc(df_raw: pd.DataFrame, trucks: List[TruckSpec]) -> Dict:
                     sort_by="area_desc",
                     use_payload_constraint=use_payload
                 )
-                if len(placed) > best_count:
-                    best_count = len(placed)
+
+                placed_area = sum(p.placed_L * p.placed_W for p in placements)
+                choice_score = (
+                    len(placed),
+                    placed_area,
+                    -_truck_sort_key(t),  # при равном результате предпочитаем меньшую машину
+                )
+
+                if best_choice_score is None or choice_score > best_choice_score:
+                    best_choice_score = choice_score
                     best_t = t
                     best_bundle = (placed, rem, placements, stats)
 
-            if best_t is None or best_bundle is None or best_count <= 0:
+            if best_t is None or best_bundle is None or best_choice_score[0] <= 0:
                 break
 
             chosen = best_t
