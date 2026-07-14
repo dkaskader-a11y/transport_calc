@@ -2,7 +2,7 @@
 import streamlit as st
 import pandas as pd
 
-from calc_v2 import TruckSpec, run_calc
+from calc import TruckSpec, run_calc
 
 st.set_page_config(page_title="Расчет транспорта по грузам", layout="wide")
 st.title("🚚 Расчет необходимого транспорта под перевозку грузов")
